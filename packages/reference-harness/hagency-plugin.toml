@@ -1,0 +1,35 @@
+schema = "hagency.plugin/v1"
+id = "reference.harness"
+name = "Reference Harness"
+version = "1.0.0"
+min_hagency_version = "0.1.0"
+platforms = ["linux-x86_64"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[harnesses]]
+id = "reference"
+command = ["bin/reference-harness"]
+protocol = "hagency.harness/v1"
+
+[[harnesses.configuration]]
+id = "reference_target"
+label = "Reference target"
+description = "Opaque target identity returned by prepare; no process is launched."
+kind = "text"
+required = true
+
+[[harnesses.configuration]]
+id = "reference_ownership"
+label = "Reference ownership"
+description = "Template ownership value echoed by prepare."
+kind = "select"
+options = ["existing", "managed"]
+default = "existing"
+
+[[panes]]
+id = "main"
+title = "Reference Agent"
+harness = "reference"
+command = ["bin/reference-harness"]

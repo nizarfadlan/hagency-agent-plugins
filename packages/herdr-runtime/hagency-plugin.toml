@@ -1,0 +1,29 @@
+schema = "hagency.plugin/v1"
+id = "herdr-runtime"
+name = "Herdr Runtime Adapter"
+version = "1.0.0"
+min_hagency_version = "0.1.0"
+platforms = ["linux-x86_64"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[runtimes]]
+id = "herdr"
+framework = "herdr"
+command = ["bin/herdr-runtime"]
+protocol = "hagency.runtime/v1"
+
+[[settings]]
+id = "herdr_bin"
+label = "Herdr executable"
+description = "Executable used by this adapter; Herdr owns provider login and credentials."
+kind = "text"
+default = "herdr"
+
+[[settings]]
+id = "herdr_env"
+label = "Allow Herdr environment"
+description = "Required opt-in for invoking the configured Herdr executable."
+kind = "boolean"
+default = true

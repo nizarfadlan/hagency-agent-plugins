@@ -1,0 +1,14 @@
+# Rust build output
+/target/
+target/
+
+# Local-only configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# Editor and operating-system noise
+.DS_Store
+.idea/
+.vscode/

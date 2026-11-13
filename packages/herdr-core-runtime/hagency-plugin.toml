@@ -1,0 +1,46 @@
+schema = "hagency.plugin/v1"
+id = "herdr-core-runtime"
+name = "herdr-core Runtime Adapter"
+version = "0.1.0"
+min_hagency_version = "0.1.0"
+platforms = ["linux-x86_64"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[runtimes]]
+id = "herdr-core"
+framework = "herdr-core"
+command = ["bin/herdr-core-runtime"]
+protocol = "hagency.runtime/v1"
+# Read-only check before a dispatch starts: is the core up, and is the target
+# agent free? A not-ready answer requeues the dispatch as never started.
+readiness = ["bin/herdr-core-runtime", "--probe"]
+
+[[settings]]
+id = "hc_bin"
+label = "hc executable"
+description = "herdr-core's CLI. Use an absolute path when it is not on the service PATH, for example /home/hagency/.local/bin/hc."
+kind = "text"
+default = "hc"
+
+[[settings]]
+id = "hc_session"
+label = "herdr-core session"
+description = "The hc session (HC_SESSION) whose core runs the agents. Empty uses the default session."
+kind = "text"
+default = ""
+
+[[settings]]
+id = "hc_home"
+label = "herdr-core home directory"
+description = "HOME given to hc. Empty uses the host's HOME, then the home of the user running the plugin."
+kind = "text"
+default = ""
+
+[[settings]]
+id = "agent_command"
+label = "Agent command"
+description = "The program a missing agent terminal is started with, in the dispatch workspace. It must report its status over OSC 7501 (omp does by default). Use an absolute path, because the core's environment starts it."
+kind = "text"
+default = "omp"

@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+package_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH= cd -- "$package_root/../.." && pwd)
+for binary in \
+    "$package_root/target/release/herdr-core-runtime" \
+    "$package_root/target/debug/herdr-core-runtime" \
+    "$repo_root/target/release/herdr-core-runtime" \
+    "$repo_root/target/debug/herdr-core-runtime"
+do
+    if [ -x "$binary" ]; then
+        exec "$binary" "$@"
+    fi
+done
+printf '%s\n' 'herdr-core-runtime is not built; run cargo build --release in the package root' >&2
+exit 127

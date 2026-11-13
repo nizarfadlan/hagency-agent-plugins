@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/reference-harness", "packages/herdr-runtime"]
+members = ["packages/reference-harness", "packages/herdr-runtime", "packages/herdr-core-runtime"]
 resolver = "2"
 
 [workspace.package]

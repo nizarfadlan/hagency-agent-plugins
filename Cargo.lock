@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "herdr-core-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "herdr-runtime"
 version = "0.3.0"
 dependencies = [

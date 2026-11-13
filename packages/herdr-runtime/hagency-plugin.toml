@@ -1,7 +1,7 @@
 schema = "hagency.plugin/v1"
 id = "herdr-runtime"
 name = "Herdr Runtime Adapter"
-version = "1.0.0"
+version = "1.2.0"
 min_hagency_version = "0.1.0"
 platforms = ["linux-x86_64"]
 
@@ -13,6 +13,9 @@ id = "herdr"
 framework = "herdr"
 command = ["bin/herdr-runtime"]
 protocol = "hagency.runtime/v1"
+# Read-only check before a dispatch starts: is the target agent there and
+# ready for input? A not-ready answer requeues the dispatch as never started.
+readiness = ["bin/herdr-runtime", "--probe"]
 
 [[settings]]
 id = "herdr_bin"
@@ -27,3 +30,10 @@ label = "Allow Herdr environment"
 description = "Required opt-in for invoking the configured Herdr executable."
 kind = "boolean"
 default = true
+
+[[settings]]
+id = "herdr_home"
+label = "Herdr home directory"
+description = "HOME given to Herdr so it finds its server socket and config. Empty uses the home of the user running the plugin; the Hagency host starts plugins without HOME."
+kind = "text"
+default = ""

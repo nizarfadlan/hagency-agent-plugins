@@ -453,7 +453,7 @@ fn agent_state(terminal: &Value) -> Option<&str> {
 /// The agent command a missing terminal is started with, as argv.
 fn agent_argv(settings: &Value) -> Vec<String> {
     setting_string(settings, "agent_command")
-        .unwrap_or_else(|| "omp".into())
+        .unwrap_or_else(|| "omp --continue".into())
         .split_whitespace()
         .map(str::to_owned)
         .collect()

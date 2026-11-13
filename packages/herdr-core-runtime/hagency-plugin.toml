@@ -1,7 +1,7 @@
 schema = "hagency.plugin/v1"
 id = "herdr-core-runtime"
 name = "herdr-core Runtime Adapter"
-version = "0.1.0"
+version = "0.1.1"
 min_hagency_version = "0.1.0"
 platforms = ["linux-x86_64"]
 
@@ -41,6 +41,6 @@ default = ""
 [[settings]]
 id = "agent_command"
 label = "Agent command"
-description = "The program a missing agent terminal is started with, in the dispatch workspace. It must report its status over OSC 7501 (omp does by default). Use an absolute path, because the core's environment starts it."
+description = "The program a missing agent terminal is started with, in the dispatch workspace. It must report its status over OSC 7501 (omp does by default). Use an absolute path, because the core's environment starts it. `--continue` resumes the agent's previous conversation in that workspace after a restart or reboot (a fresh workspace simply starts a new one)."
 kind = "text"
-default = "omp"
+default = "omp --continue"

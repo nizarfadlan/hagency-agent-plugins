@@ -172,8 +172,10 @@ WantedBy=default.target
 ```
 
 `systemctl --user enable --now herdr-core.service` (with `loginctl
-enable-linger <user>`). herdr-wake is not needed: Hagency restarts the agent on
-the next dispatch, and Hagency's own task context carries the conversation.
+enable-linger <user>`). After a reboot the next dispatch starts the agent
+again in its workspace; with `agent_command = "omp --continue"` (the
+default) omp resumes its previous conversation there. herdr-wake is not
+needed, and it does not support omp.
 
 `packages/herdr-core-runtime/tests/conformance.rs` runs the adapter against a
 fake `hc`: creation in the workspace, reuse, check-in waits, refusals, the

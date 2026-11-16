@@ -5,6 +5,11 @@
 //! emits a `progress` heartbeat every second, because the host reads turn
 //! frames with a short idle timeout. `turn/cancel` stops the running Herdr
 //! command and settles the turn as `interrupted`.
+//!
+//! When the host offers task tools in `turn/start`, a Unix socket serves them
+//! to the agent's MCP child for the length of the turn (see [`bridge`]).
+mod bridge;
+
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -13,7 +18,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -265,11 +270,16 @@ struct TurnContext {
     deadline: Instant,
     started: Instant,
     last_heartbeat: Instant,
+    /// Bridge calls waiting for the host. The host reads no frames while it
+    /// waits for the owner, so a heartbeat per second would fill the pipe.
+    bridge_calls: Arc<AtomicUsize>,
 }
 
 impl TurnContext {
     fn heartbeat(&mut self) {
-        if self.last_heartbeat.elapsed() < HEARTBEAT {
+        if self.last_heartbeat.elapsed() < HEARTBEAT
+            || self.bridge_calls.load(Ordering::Acquire) > 0
+        {
             return;
         }
         self.last_heartbeat = Instant::now();
@@ -591,6 +601,7 @@ struct Running {
     dispatch_id: String,
     turn_id: String,
     cancel: Arc<AtomicBool>,
+    bridge: Option<bridge::Routes>,
     worker: JoinHandle<()>,
 }
 
@@ -623,13 +634,47 @@ fn start_turn(id: &str, params: &Value, running: &mut Option<Running>) -> Value 
         .clamp(1, MAX_TIMEOUT_MS);
     let cancel = Arc::new(AtomicBool::new(false));
     let now = Instant::now();
+    let deadline = now + Duration::from_millis(timeout_ms);
+    let bridge_calls = Arc::new(AtomicUsize::new(0));
+    // Only a turn offered tools gets a socket. A bridge that cannot start does
+    // not stop the turn; the agent just has no host tools, and says so.
+    let (mut bridge, bridge_note) = match (target(params), bridge::bridge_dir(&settings())) {
+        (Ok(target), Some(dir)) => match bridge::Bridge::start(
+            &dir,
+            &target,
+            (&dispatch_id, &turn_id),
+            params.get("tools"),
+            cancel.clone(),
+            deadline,
+            bridge_calls.clone(),
+        ) {
+            Ok(bridge) => (bridge, None),
+            Err(message) => (
+                None,
+                Some(format!("herdr: host tools unavailable: {message}")),
+            ),
+        },
+        (_, None)
+            if params
+                .get("tools")
+                .is_some_and(|tools| tools.as_array().is_some_and(|t| !t.is_empty())) =>
+        {
+            (
+                None,
+                Some("herdr: host tools unavailable: no bridge directory".to_owned()),
+            )
+        }
+        _ => (None, None),
+    };
+    let routes = bridge.as_ref().map(bridge::Bridge::routes);
     let mut context = TurnContext {
         dispatch_id: dispatch_id.clone(),
         turn_id: turn_id.clone(),
         cancel: cancel.clone(),
-        deadline: now + Duration::from_millis(timeout_ms),
+        deadline,
         started: now,
         last_heartbeat: now,
+        bridge_calls,
     };
     let params = params.clone();
     // The acceptance must reach the host before any provider work begins.
@@ -643,7 +688,17 @@ fn start_turn(id: &str, params: &Value, running: &mut Option<Running>) -> Value 
                 "text": "herdr: starting supervised agent turn"
             }),
         ));
+        if let Some(note) = bridge_note {
+            let _ = emit(&notification(
+                "progress",
+                json!({"dispatchId": context.dispatch_id, "turnId": context.turn_id, "text": note}),
+            ));
+        }
         let outcome = run_turn(&mut context, &params);
+        // The socket is gone before the host sees the turn end.
+        if let Some(bridge) = bridge.as_mut() {
+            bridge.close();
+        }
         let _ = emit(&turn_result(
             &context.dispatch_id,
             &context.turn_id,
@@ -654,6 +709,7 @@ fn start_turn(id: &str, params: &Value, running: &mut Option<Running>) -> Value 
         dispatch_id,
         turn_id,
         cancel,
+        bridge: routes,
         worker,
     });
     Value::Null
@@ -703,7 +759,7 @@ fn handle(value: Value, running: &mut Option<Running>) -> Result<(Value, bool), 
             } else {
                 response(
                     &id,
-                    json!({"protocol": PROTOCOL, "ready": true, "capabilities": ["turn"]}),
+                    json!({"protocol": PROTOCOL, "ready": true, "capabilities": ["turn", "tool"]}),
                 )
             }
         }
@@ -723,6 +779,25 @@ fn handle(value: Value, running: &mut Option<Running>) -> Result<(Value, bool), 
                 }
                 Err(message) => error(&id, -32602, message),
             }
+        }
+        // The host's answer to a bridge call. It needs no reply; a result for
+        // an unknown, finished or repeated call is ignored.
+        "tool/result" => {
+            let ids = text(&params, "dispatchId", 128).and_then(|d| {
+                Ok((
+                    d,
+                    text(&params, "turnId", 128)?,
+                    text(&params, "callId", 256)?,
+                ))
+            });
+            if let (Ok((dispatch_id, turn_id, call_id)), Some(result), Some(routes)) = (
+                ids,
+                params.get("result").filter(|result| result.is_object()),
+                running.as_ref().and_then(|turn| turn.bridge.as_ref()),
+            ) {
+                routes.deliver(&dispatch_id, &turn_id, &call_id, result.clone());
+            }
+            return Ok((Value::Null, false));
         }
         "shutdown" => {
             if let Some(turn) = running.take() {
@@ -824,6 +899,10 @@ fn probe_main() -> io::Result<()> {
 fn main() -> io::Result<()> {
     if env::args().nth(1).as_deref() == Some("--probe") {
         return probe_main();
+    }
+    if env::args().nth(1).as_deref() == Some("--mcp") {
+        let args: Vec<String> = env::args().skip(2).collect();
+        return bridge::mcp_main(&args);
     }
     let mut running: Option<Running> = None;
     let result = (|| {

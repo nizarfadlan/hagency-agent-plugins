@@ -1,7 +1,7 @@
 schema = "hagency.plugin/v1"
 id = "herdr-runtime"
 name = "Herdr Runtime Adapter"
-version = "1.3.0"
+version = "1.4.0"
 min_hagency_version = "0.1.0"
 platforms = ["linux-x86_64"]
 
@@ -35,5 +35,12 @@ default = true
 id = "herdr_home"
 label = "Herdr home directory"
 description = "HOME given to Herdr so it finds its server socket and config. Empty uses the home of the user running the plugin; the Hagency host starts plugins without HOME."
+kind = "text"
+default = ""
+
+[[settings]]
+id = "bridge_dir"
+label = "Host tool bridge directory"
+description = "Absolute directory for the per-target sockets that give the agent's MCP child the host's task tools during a turn (mode 0700). Empty uses .hagency/herdr-bridge in the home of the user running the plugin."
 kind = "text"
 default = ""

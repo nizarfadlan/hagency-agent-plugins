@@ -381,7 +381,7 @@ fn herdr(context: &mut TurnContext, settings: &Value, args: &[String]) -> Result
     })
 }
 
-fn run_turn(context: &mut TurnContext, params: &Value) -> Result<String, Stop> {
+fn run_turn(context: &mut TurnContext, params: &Value) -> Result<Answer, Stop> {
     let target = target(params)?;
     let prompt = params
         .get("prompt")
@@ -390,6 +390,15 @@ fn run_turn(context: &mut TurnContext, params: &Value) -> Result<String, Stop> {
         .ok_or_else(|| "prompt is required".to_owned())?;
     let settings = settings();
     let sent = prompt_text(prompt);
+    // Where the agent's own transcript ends before this turn. Best effort:
+    // an agent without a transcript is answered from its screen instead.
+    let before = herdr(
+        context,
+        &settings,
+        &["agent".into(), "get".into(), target.clone()],
+    )
+    .ok()
+    .and_then(|agent| session_mark(&agent));
     let remaining = context
         .deadline
         .saturating_duration_since(Instant::now())
@@ -409,6 +418,9 @@ fn run_turn(context: &mut TurnContext, params: &Value) -> Result<String, Stop> {
             remaining,
         ],
     )?;
+    if let Some(answer) = before.and_then(|mark| transcript_answer(&mark, &sent)) {
+        return Ok(answer);
+    }
     let screen = herdr(
         context,
         &settings,
@@ -422,18 +434,145 @@ fn run_turn(context: &mut TurnContext, params: &Value) -> Result<String, Stop> {
             SCREEN_LINES.into(),
         ],
     )?;
-    Ok(if screen.is_null() {
-        text_from(&prompted)
-    } else {
-        answer_from_screen(&text_from(&screen), &sent)
+    Ok(Answer {
+        text: if screen.is_null() {
+            text_from(&prompted)
+        } else {
+            answer_from_screen(&text_from(&screen), &sent)
+        },
+        usage: None,
     })
 }
 
-fn turn_result(dispatch_id: &str, turn_id: &str, outcome: Result<String, Stop>) -> Value {
-    let (outcome, final_text, error) = match outcome {
-        Ok(text) => ("completed", Value::String(text), Value::Null),
-        Err(Stop::Cancelled) => ("interrupted", Value::Null, Value::Null),
-        Err(Stop::Failed(message)) => ("failed", Value::Null, Value::String(message)),
+// -------------------------------------------------------------- transcript
+
+/// What the turn returns: the agent's answer and, when the agent's own
+/// transcript reports it, the turn's token usage (never invented as zero).
+#[derive(Debug, PartialEq)]
+struct Answer {
+    text: String,
+    usage: Option<Value>,
+}
+
+/// The agent's transcript file and its length before the turn.
+#[derive(Debug, PartialEq)]
+struct SessionMark {
+    path: PathBuf,
+    offset: u64,
+}
+
+/// The most transcript a turn reads: the tail written during this turn.
+const MAX_TRANSCRIPT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// `herdr agent get` names the agent's session transcript (OMP writes one
+/// JSONL record per message). Only an absolute `.jsonl` path is trusted.
+fn session_mark(agent: &Value) -> Option<SessionMark> {
+    let session = agent
+        .pointer("/result/agent/agent_session")
+        .or_else(|| agent.pointer("/agent/agent_session"))?;
+    if session.get("kind").and_then(Value::as_str) != Some("path") {
+        return None;
+    }
+    let path = PathBuf::from(session.get("value").and_then(Value::as_str)?);
+    if !path.is_absolute() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return None;
+    }
+    let offset = fs::metadata(&path).ok()?.len();
+    Some(SessionMark { path, offset })
+}
+
+/// The answer this turn wrote to the transcript: after the user message that
+/// carries exactly the prompt we sent, the text of the last assistant
+/// message that has text. Thinking blocks are the model's own reasoning and
+/// never part of the answer. Usage is summed over the turn's assistant
+/// messages. None when the turn cannot be found; the screen answers then.
+fn transcript_answer(mark: &SessionMark, sent: &str) -> Option<Answer> {
+    let mut file = fs::File::open(&mark.path).ok()?;
+    let length = file.metadata().ok()?.len();
+    // A shorter file is a different transcript; read it from the start.
+    let start = if length >= mark.offset {
+        mark.offset
+    } else {
+        0
+    };
+    if length.saturating_sub(start) > MAX_TRANSCRIPT_BYTES {
+        return None;
+    }
+    io::Seek::seek(&mut file, io::SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_TRANSCRIPT_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    answer_from_transcript(&String::from_utf8_lossy(&bytes), sent)
+}
+
+fn answer_from_transcript(records: &str, sent: &str) -> Option<Answer> {
+    let messages: Vec<Value> = records
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record.get("type").and_then(Value::as_str) == Some("message"))
+        .filter_map(|record| record.get("message").cloned())
+        .collect();
+    let blocks = |message: &Value, kind: &str| -> String {
+        message
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|content| {
+                content
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some(kind))
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default()
+    };
+    let asked = messages.iter().rposition(|message| {
+        message.get("role").and_then(Value::as_str) == Some("user")
+            && blocks(message, "text").trim() == sent.trim()
+    })?;
+    let turn: Vec<&Value> = messages[asked + 1..]
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .collect();
+    let text = turn
+        .iter()
+        .rev()
+        .map(|message| blocks(message, "text"))
+        .find(|text| !text.trim().is_empty())?;
+    let mut usage = serde_json::Map::new();
+    for (from, to) in [
+        ("input", "input"),
+        ("output", "output"),
+        ("reasoningTokens", "reasoning"),
+        ("cacheRead", "cacheRead"),
+        ("cacheWrite", "cacheWrite"),
+    ] {
+        let values: Vec<u64> = turn
+            .iter()
+            .filter_map(|message| message.pointer(&format!("/usage/{from}")))
+            .filter_map(Value::as_u64)
+            .collect();
+        if !values.is_empty() {
+            usage.insert(to.into(), json!(values.iter().sum::<u64>()));
+        }
+    }
+    Some(Answer {
+        text: text.trim().chars().take(MAX_REPLY_CHARS).collect(),
+        usage: (!usage.is_empty()).then_some(Value::Object(usage)),
+    })
+}
+
+fn turn_result(dispatch_id: &str, turn_id: &str, outcome: Result<Answer, Stop>) -> Value {
+    let (outcome, final_text, error, usage) = match outcome {
+        Ok(answer) => (
+            "completed",
+            Value::String(answer.text),
+            Value::Null,
+            answer.usage.unwrap_or(Value::Null),
+        ),
+        Err(Stop::Cancelled) => ("interrupted", Value::Null, Value::Null, Value::Null),
+        Err(Stop::Failed(message)) => ("failed", Value::Null, Value::String(message), Value::Null),
     };
     notification(
         "turn/result",
@@ -443,7 +582,7 @@ fn turn_result(dispatch_id: &str, turn_id: &str, outcome: Result<String, Stop>) 
             "outcome": outcome,
             "finalText": final_text,
             "error": error,
-            "usage": null
+            "usage": usage
         }),
     )
 }
@@ -817,7 +956,14 @@ mod tests {
 
     #[test]
     fn turn_result_maps_outcomes() {
-        let ok = turn_result("d", "t", Ok("hi".into()));
+        let ok = turn_result(
+            "d",
+            "t",
+            Ok(Answer {
+                text: "hi".into(),
+                usage: None,
+            }),
+        );
         assert_eq!(ok["params"]["outcome"], "completed");
         assert_eq!(ok["params"]["finalText"], "hi");
         assert!(
@@ -829,5 +975,74 @@ mod tests {
         let failed = turn_result("d", "t", Err(Stop::Failed("boom".into())));
         assert_eq!(failed["params"]["outcome"], "failed");
         assert_eq!(failed["params"]["error"], "boom");
+    }
+
+    fn record(role: &str, content: Value, usage: Value) -> String {
+        json!({"type": "message", "message": {"role": role, "content": content, "usage": usage}})
+            .to_string()
+    }
+
+    #[test]
+    fn transcript_answer_is_the_text_after_our_prompt_without_thinking() {
+        let sent = "Matrix request for a (reply concisely; ...): resend";
+        let records = [
+            record("user", json!([{"type":"text","text":"older prompt"}]), Value::Null),
+            record("assistant", json!([{"type":"text","text":"older answer"}]), json!({"input": 9})),
+            json!({"type":"model_change"}).to_string(),
+            record("user", json!([{"type":"text","text":sent}]), Value::Null),
+            record("assistant", json!([{"type":"thinking","thinking":"Same request again."},{"type":"toolCall"}]), json!({"input": 10, "output": 2})),
+            record("assistant", json!([{"type":"thinking","thinking":"Keep it concise."},{"type":"text","text":"\n\n**Summary**\n\n1. done"}]),
+                json!({"input": 5, "output": 3, "reasoningTokens": 1, "cacheRead": 7, "cacheWrite": 0})),
+            "not json".to_owned(),
+        ]
+        .join("\n");
+        let answer = answer_from_transcript(&records, sent).unwrap();
+        assert_eq!(answer.text, "**Summary**\n\n1. done");
+        assert!(!answer.text.contains("Same request"));
+        assert_eq!(
+            answer.usage,
+            Some(
+                json!({"input": 15, "output": 5, "reasoning": 1, "cacheRead": 7, "cacheWrite": 0})
+            )
+        );
+    }
+
+    #[test]
+    fn transcript_without_our_prompt_or_text_falls_back_to_the_screen() {
+        let only_other = record("user", json!([{"type":"text","text":"other"}]), Value::Null);
+        assert_eq!(answer_from_transcript(&only_other, "ours"), None);
+        let thinking_only = [
+            record("user", json!([{"type":"text","text":"ours"}]), Value::Null),
+            record(
+                "assistant",
+                json!([{"type":"thinking","thinking":"hmm"}]),
+                Value::Null,
+            ),
+        ]
+        .join("\n");
+        assert_eq!(answer_from_transcript(&thinking_only, "ours"), None);
+    }
+
+    #[test]
+    fn session_mark_trusts_only_an_absolute_jsonl_path() {
+        let dir = std::env::temp_dir().join(format!("herdr-runtime-mark-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s.jsonl");
+        fs::write(&file, "abc").unwrap();
+        let agent = |value: &str, kind: &str| json!({"result":{"agent":{"agent_session":{"kind":kind,"value":value}}}});
+        assert_eq!(
+            session_mark(&agent(file.to_str().unwrap(), "path")),
+            Some(SessionMark {
+                path: file.clone(),
+                offset: 3
+            })
+        );
+        assert_eq!(session_mark(&agent("relative/s.jsonl", "path")), None);
+        assert_eq!(
+            session_mark(&agent(dir.join("s.txt").to_str().unwrap(), "path")),
+            None
+        );
+        assert_eq!(session_mark(&agent(file.to_str().unwrap(), "id")), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

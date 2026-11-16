@@ -1,7 +1,7 @@
 schema = "hagency.plugin/v1"
 id = "herdr-runtime"
 name = "Herdr Runtime Adapter"
-version = "1.4.0"
+version = "1.5.0"
 min_hagency_version = "0.1.0"
 platforms = ["linux-x86_64"]
 

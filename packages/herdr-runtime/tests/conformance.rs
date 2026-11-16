@@ -336,7 +336,13 @@ fn probe(fixture: &Fixture, agent: &str, input: Value) -> Value {
 #[test]
 fn readiness_probe_reports_the_target_agent() {
     let fixture = Fixture::new();
-    let input = json!({"dispatchId": "dispatch", "harnessTemplate": {"target": "assistant"}});
+    // The host's real input: the prepared `harnessContext` the turn will get,
+    // beside the frozen template values under the harness's own key names.
+    let input = json!({
+        "dispatchId": "dispatch",
+        "harnessContext": {"target": "assistant", "ownership": "existing"},
+        "harnessTemplate": {"reference_target": "assistant", "reference_ownership": "existing"},
+    });
     assert_eq!(
         probe(&fixture, "ready", input.clone()),
         json!({"ready": true})
@@ -359,8 +365,11 @@ fn readiness_probe_reports_the_target_agent() {
     }
     for missing in [
         json!({}),
-        json!({"harnessTemplate": null}),
-        json!({"harnessTemplate": {"target": ""}}),
+        json!({"harnessContext": null, "harnessTemplate": null}),
+        json!({"harnessContext": {"target": ""}}),
+        // A template alone is not a target: only the prepared context is.
+        json!({"harnessTemplate": {"reference_target": "assistant"}}),
+        json!({"harnessTemplate": {"target": "assistant"}}),
     ] {
         assert_eq!(
             probe(&fixture, "ready", missing.clone())["ready"],

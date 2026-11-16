@@ -816,13 +816,17 @@ fn handle(value: Value, running: &mut Option<Running>) -> Result<(Value, bool), 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The host's readiness probe (`readiness` in the manifest): is the agent this
-/// dispatch would prompt there and ready for input? Read-only: it only asks
+/// dispatch would prompt there and ready for input? The host gives it the
+/// `harnessContext` the turn will receive (`target`, `ownership`), obtained by
+/// asking the harness to prepare and release the agent before the dispatch
+/// starts; the frozen `harnessTemplate` values are not read, their key names
+/// belong to the harness. Read-only: it only asks
 /// `herdr agent get`. It answers one JSON object and never starts anything, so
 /// a not-ready answer lets the host requeue the dispatch as never started.
 fn probe(input: &Value, settings: &Value) -> Value {
     let not_ready = |reason: String| json!({"ready": false, "reason": reason});
     let Some(target) = input
-        .pointer("/harnessTemplate/target")
+        .pointer("/harnessContext/target")
         .and_then(Value::as_str)
         .and_then(clean)
     else {

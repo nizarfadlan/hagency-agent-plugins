@@ -5,10 +5,6 @@ Small plugin packages for the Hagency boundaries:
 - `reference-harness` implements the generic `hagency.harness/v1` seam for the
   next agent-harness design.
 - `herdr-runtime` implements `hagency.runtime/v1` as the current provider-backed agent runtime plugin.
-- `herdr-core-runtime` implements `hagency.runtime/v1` on herdr-core (`hc`):
-  one named terminal per agent, recreated in the dispatch workspace when gone,
-  with a readiness probe so a stopped core defers dispatches instead of
-  quarantining sessions.
 
 The split is intentional: the harness is generic and view-only, while the runtime
 adapter is the provider-specific execution side. No package contains Matrix,
@@ -85,10 +81,22 @@ The adapter follows the host runtime contract that every runtime plugin must mee
   the user running the plugin, in that order.
 - The prompt sent to Herdr is the request in `inbox[].message.body` (mention
   links reduced to `@name`), not the envelope's generic `instruction`.
-- `finalText` is the agent's answer cut from the `herdr agent read` screen
-  (banner, prompt echo, input line and status footer removed). `usage` stays
-  `null` (unknown), never zero. For a plugin runtime the host turns a completed
-  turn's `finalText` into the room reply when the task has a Matrix route.
+- `finalText` is the agent's answer from its own session transcript: `herdr
+  agent get` names the transcript file (OMP writes one JSONL record per
+  message), and the adapter takes the text of the last assistant message
+  after the user message that carries exactly the prompt it sent. The model's
+  `thinking` blocks are never part of the answer. `usage` is the sum of that
+  turn's assistant `usage` records (`input`, `output`, `reasoning`,
+  `cacheRead`, `cacheWrite`). When there is no transcript, or the turn cannot
+  be found in it, the answer is cut from the `herdr agent read` screen
+  (banner, prompt echo, input line and status footer removed) and `usage`
+  stays `null` (unknown), never zero. For a plugin runtime the host turns a
+  completed turn's `finalText` into the room reply when the task has a Matrix
+  route.
+- The manifest declares a read-only `readiness` probe (`bin/herdr-runtime
+  --probe`, `herdr agent get`). A stopped Herdr server or an agent that is not
+  ready for input answers not ready, and Hagency requeues the dispatch as
+  never started, so the session is never quarantined for it.
 - The adapter does not advertise the `tool` capability: Herdr exposes pane
   control only, so the agent in the pane cannot reach Hagency task tools. A
   runtime that can relay tool requests advertises `tool` at `initialize`,
@@ -127,56 +135,34 @@ manifests). They prefer a package-local release binary, then a package-local deb
 binary, and finally the workspace binary, so GitHub package builds and local
 linked-plugin smoke tests use the same entrypoint.
 
-### Agent runtime package (`herdr-core-runtime`)
+### Keeping Herdr up across reboots
 
-`herdr-core-runtime` runs the agent in [herdr-core](https://github.com/herdrdev/herdr-core)
-(`hc`) instead of the Herdr TUI. One named `hc` terminal per agent target
-(`harnessContext.target`):
-
-- A turn checks the core's socket first and never autostarts a core: a core
-  started by `hc` takes its caller's environment, and the plugin's is bare.
-- A target that is gone (first use, or `finished` after a core restart or a
-  reboot) is started again in the dispatch workspace with `agent_command`;
-  a live target is reused, never retasked. No `--keep`, so a lost agent never
-  comes back as a bare shell under the agent's name.
-- A busy (`working`) or `blocked` agent is refused without typing into it.
-- The turn types the `inbox` request with `hc send --wait` and keeps waiting
-  (`hc wait`) until the agent's own OSC 7501 status reports `done`; `blocked`,
-  `error` and exit are failures with their reason. The agent must report OSC
-  7501 (omp does by default: `terminal.programStatus`).
-- `turn/cancel` stops the wait and presses the agent's stop key
-  (`hc interrupt`).
-- The manifest declares a read-only `readiness` probe
-  (`bin/herdr-core-runtime --probe`). A stopped core or a busy/blocked agent
-  answers not ready, and Hagency requeues the dispatch as never started, so
-  the session is never quarantined for it.
-
-Settings: `hc_bin` and `agent_command` should be absolute paths (the host's
-PATH and the core's environment may not include `~/.local/bin`), plus
-`hc_session` and `hc_home`.
-
-The core is the machine's service, not the plugin's. A systemd user unit with
-linger keeps it across reboots:
+The Herdr server is the machine's service, not the plugin's: the adapter never
+starts one. Run it as a systemd user unit with linger, so it starts at boot
+without a login. Herdr restores its saved session on start (workspaces, panes,
+and the agents in them; omp is reopened with `--resume` on its previous
+conversation), and the readiness probe defers dispatches until it is up.
 
 ```ini
-# ~/.config/systemd/user/herdr-core.service
+# ~/.config/systemd/user/herdr.service
+[Unit]
+Description=Herdr server (agent panes for Hagency herdr-runtime)
+After=default.target
+
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
+Environment=HOME=%h
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/herdr-core server start
-ExecStop=%h/.local/bin/herdr-core server stop
+WorkingDirectory=%h
+ExecStart=%h/.local/bin/herdr server
+ExecStop=%h/.local/bin/herdr server stop
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=default.target
 ```
 
-`systemctl --user enable --now herdr-core.service` (with `loginctl
-enable-linger <user>`). After a reboot the next dispatch starts the agent
-again in its workspace; with `agent_command = "omp --continue"` (the
-default) omp resumes its previous conversation there. herdr-wake is not
-needed, and it does not support omp.
-
-`packages/herdr-core-runtime/tests/conformance.rs` runs the adapter against a
-fake `hc`: creation in the workspace, reuse, check-in waits, refusals, the
-no-core rule, cancel, restart after `finished`, and the probe.
+`loginctl enable-linger <user>`, then `systemctl --user enable --now
+herdr.service`. Put every tool the agents need on that `PATH`: panes inherit
+the unit's environment, not a login shell's.
